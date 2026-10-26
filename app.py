@@ -1,134 +1,118 @@
 import os
-from pathlib import Path
-import requests
 import json
-from dotenv import load_dotenv  # Для безопасного хранения токена
+import requests
+from dotenv import load_dotenv
 
 
-# Загружаем переменные окружения из файла .env
-load_dotenv()
-YANDEX_TOKEN = os.getenv("YANDEX_DISK_TOKEN")
-if not YANDEX_TOKEN:
-    raise ValueError("Не найден токен Яндекс.Диска. Убедитесь, что он указан в файле .env.")
+class IpifyClient:
+    def __init__(self, base_url: str = "https://api.ipify.org", timeout: int = 10):
+        self.base_url = base_url
+        self.timeout = timeout
+
+    def get_current_ip(self) -> str:
+        response = requests.get(self.base_url, timeout=self.timeout)
+        response.raise_for_status()
+        return response.text.strip()
 
 
-def get_current_ip() -> str:
-    """Получает текущий публичный IP-адрес пользователя."""
-    response = requests.get('https://api.ipify.org')
-    return response.text.strip()
+class IpInfoClient:
+    def __init__(self, base_url: str = "https://ipinfo.io", timeout: int = 10):
+        self.base_url = base_url
+        self.timeout = timeout
 
-
-def get_geo_info(ip_address: str) -> dict:
-    """
-    Получает географическую информацию об IP через ipinfo.io.
-    
-    Args:
-        ip_address: Публичный IPv4 адрес.
-    
-    Returns:
-        Словарь с информацией о городе, регионе, стране и координатах.
-    """
-    url = f"https://ipinfo.io/{ip_address}/geo"
-    response = requests.get(url)
-    if response.status_code == 200:
+    def get_geo_info(self, ip_address: str) -> dict:
+        url = f"{self.base_url}/{ip_address}/geo"
+        response = requests.get(url, timeout=self.timeout)
+        response.raise_for_status()
         data = response.json()
-        # Оставляем только нужные поля
-        geo_data = {
-            'city': data.get('city', ''),
-            'region': data.get('region', ''),
-            'country': data.get('country', ''),
-            'loc': data.get('loc', '')
+        return {
+            "city": data.get("city", ""),
+            "region": data.get("region", ""),
+            "country": data.get("country", ""),
+            "loc": data.get("loc", ""),
         }
-        return geo_data
-    else:
-        print(f"Ошибка при получении геоданных: {response.status_code} - {response.text}")
-        return {}
 
 
-def create_folder_on_yadisk(folder_name: str):
-    """
-    Создаёт папку на Яндекс.Диске или проверяет её существование.
-    
-    Args:
-        folder_name: Название папки без слэшей.
-    
-    Returns:
-        Полный путь к папке на Диске.
-    """
-    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
-    remote_path = f"/{folder_name}"
-    params = {'path': remote_path}
+class YandexDiskClient:
+    def __init__(
+        self,
+        token: str,
+        base_url: str = "https://cloud-api.yandex.net/v1/disk",
+        timeout: int = 30,
+    ):
+        self.token = token
+        self.base_url = base_url
+        self.timeout = timeout
 
-    # Проверяем, существует ли уже папка
-    check_response = requests.get(
-        "https://cloud-api.yandex.net/v1/disk/resources",
-        headers=headers,
-        params=params
-    )
-    if check_response.status_code == 200:
-        print(f"Папка '{folder_name}' уже существует.")
-        return remote_path
+    @property
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"OAuth {self.token}"}
 
-    # Если нет — создаём
-    create_response = requests.put(
-        "https://cloud-api.yandex.net/v1/disk/resources",
-        headers=headers,
-        params={'path': remote_path}
-    )
-    if create_response.status_code in [201, 409]:
-        print(f"Создана папка '{folder_name}'.")
-        return remote_path
-    else:
-        raise Exception(f"Не удалось создать папку: {create_response.status_code}, {create_response.text}")
+    def create_folder(self, folder_name: str) -> str:
+        remote_path = f"/{folder_name}"
+        response = requests.put(
+            f"{self.base_url}/resources",
+            headers=self._auth_headers,
+            params={"path": remote_path},
+            timeout=self.timeout,
+        )
+        if response.status_code == 201:
+            print(f"Создана папка '{folder_name}'.")
+            return remote_path
+        if response.status_code == 409:
+            print(f"Папка '{folder_name}' уже существует.")
+            return remote_path
+        response.raise_for_status()
+        raise RuntimeError(
+            f"Не удалось создать папку: {response.status_code}, {response.text}"
+        )
 
+    def upload_json(self, remote_folder: str, filename: str, content: bytes) -> None:
+        full_remote_path = f"{remote_folder}/{filename}"
+        response = requests.get(
+            f"{self.base_url}/resources/upload",
+            headers=self._auth_headers,
+            params={"path": full_remote_path, "overwrite": "true"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        href = response.json().get("href")
+        if not href:
+            raise RuntimeError(f"Не удалось получить ссылку для загрузки: {response.text}")
 
-def upload_json_to_yadisk(remote_folder: str, filename: str, content: bytes):
-    """
-    Загружает JSON-файл напрямую на Яндекс.Диск.
-    
-    Args:
-        remote_folder: Путь к целевой папке.
-        filename: Имя файла.
-        content: Бинарные данные файла.
-    """
-    headers = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
-    full_remote_path = f"{remote_folder}/{filename}"
-
-    # Шаг 1: Запрашиваем ссылку для загрузки
-    params = {'path': full_remote_path, 'overwrite': 'true'}
-    response = requests.get(
-        "https://cloud-api.yandex.net/v1/disk/resources/upload",
-        headers=headers,
-        params=params
-    )
-    href = response.json().get('href')
-    if not href:
-        raise Exception(f"Не удалось получить ссылку для загрузки: {response.text}")
-
-    # Шаг 2: Отправляем файл по полученной ссылке
-    put_response = requests.put(href, data=content)
-    if put_response.status_code != 201:
-        raise Exception(f"Ошибка при загрузке файла: {put_response.status_code}, {put_response.text}")
-    print(f"Успешно загружено: {full_remote_path}")
+        put_response = requests.put(href, data=content, timeout=self.timeout)
+        put_response.raise_for_status()
+        if put_response.status_code != 201:
+            raise RuntimeError(
+                f"Ошибка при загрузке файла: {put_response.status_code}, {put_response.text}"
+            )
+        print(f"Успешно загружено: {full_remote_path}")
 
 
 def main():
-    current_ip = get_current_ip()
+    load_dotenv()
+    token = os.getenv("YANDEX_DISK_TOKEN")
+    if not token:
+        raise ValueError(
+            "Не найден токен Яндекс.Диска. Убедитесь, что он указан в файле .env."
+        )
+
+    ipify = IpifyClient()
+    ipinfo = IpInfoClient()
+    yadisk = YandexDiskClient(token=token)
+
+    current_ip = ipify.get_current_ip()
     print(f"Ваш текущий IP-адрес: {current_ip}")
 
-    geo_data = get_geo_info(current_ip)
+    geo_data = ipinfo.get_geo_info(current_ip)
     print(f"Геоинформация: {geo_data}")
 
-    # Формируем имя папки и файла
     folder_name = f"IP_{current_ip.replace('.', '_')}_GeoInfo"
     file_name = "geoinfo.json"
+    json_bytes = json.dumps(geo_data, ensure_ascii=False, indent=4).encode("utf-8")
 
-    # Сохраняем данные в байты (для прямой отправки на диск)
-    json_bytes = json.dumps(geo_data, ensure_ascii=False, indent=4).encode('utf-8')
-
-    # Работа с Яндекс.Диском
-    remote_folder = create_folder_on_yadisk(folder_name)
-    upload_json_to_yadisk(remote_folder, file_name, json_bytes)
+    remote_folder = yadisk.create_folder(folder_name)
+    yadisk.upload_json(remote_folder, file_name, json_bytes)
 
 
 if __name__ == "__main__":
